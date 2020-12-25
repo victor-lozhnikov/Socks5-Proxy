@@ -35,6 +35,8 @@ public class ProxyServer {
         this.proxyPort = proxyPort;
         this.dnsPort = dnsPort;
 
+        channelToHandler = new ConcurrentHashMap<>();
+
         try {
             selector = SelectorProvider.provider().openSelector();
             serverSocketChannel = ServerSocketChannel.open();
@@ -49,8 +51,6 @@ public class ProxyServer {
             System.exit(1);
         }
 
-        channelToHandler = new ConcurrentHashMap<>();
-
         log.info("Proxy server started. Host : " + host + ". Port : " + proxyPort);
         try {
             while (selector.select() > -1) {
@@ -61,9 +61,6 @@ public class ProxyServer {
                     if (key.isValid()) {
                         if (key.isAcceptable()) {
                             accept(key);
-                        }
-                        else if (key.channel().equals(DnsResolver.getInstance().getDnsChannel())) {
-                            DnsResolver.getInstance().handleKey(key);
                         }
                         else {
                             channelToHandler.get(key.channel()).handleKey(key);
@@ -90,5 +87,9 @@ public class ProxyServer {
 
     public void putNewChannel(SelectableChannel channel, IHandler handler) {
         channelToHandler.put(channel, handler);
+    }
+
+    public void removeChannelFromMap(SelectableChannel channel) {
+        channelToHandler.remove(channel);
     }
 }

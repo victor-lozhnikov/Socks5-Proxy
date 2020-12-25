@@ -17,7 +17,7 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 
-public class DnsResolver {
+public class DnsResolver implements IHandler {
     private static final Logger log = LoggerFactory.getLogger(DnsResolver.class);
 
     private static DnsResolver instance;
@@ -42,6 +42,7 @@ public class DnsResolver {
         dnsChannel.socket().connect(dnsServer);
         dnsChannel.configureBlocking(false);
         dnsKey = dnsChannel.register(selector, 0);
+        ProxyServer.getInstance().putNewChannel(dnsChannel, this);
         requestQueue = new ConcurrentLinkedDeque<>();
         responseQueue = new ConcurrentHashMap<>();
         log.info("DNS resolver started. Host : " + host + ". Port : " + port + ". DNS Server : "
@@ -50,10 +51,11 @@ public class DnsResolver {
 
     public void addNewRequest(ClientHandler clientHandler, String address) {
         requestQueue.add(new DnsRequest(clientHandler, address));
-        dnsKey.interestOps(SelectionKey.OP_WRITE);
+        dnsKey.interestOps(dnsKey.interestOps() | SelectionKey.OP_WRITE);
         log.info("New DNS request : " + address);
     }
 
+    @Override
     public void handleKey(SelectionKey key) {
         if (key.isWritable()) {
             sendDnsMessage(key);
@@ -64,11 +66,6 @@ public class DnsResolver {
     }
 
     private void sendDnsMessage(SelectionKey key) {
-        if (requestQueue.isEmpty()) {
-            key.interestOps(SelectionKey.OP_READ);
-            return;
-        }
-
         Message message = new Message();
         Header header = new Header();
         header.setFlag(Flags.RD);
@@ -91,16 +88,14 @@ public class DnsResolver {
         try {
             log.info("Sending DNS request");
             dnsChannel.write(byteBuffer);
+            dnsKey.interestOps(dnsKey.interestOps() | SelectionKey.OP_READ);
         }
         catch (IOException e) {
             log.error(e.toString());
         }
 
         if (requestQueue.isEmpty()) {
-            key.interestOps(SelectionKey.OP_READ);
-        }
-        else {
-            key.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+            dnsKey.interestOps(SelectionKey.OP_READ);
         }
     }
 

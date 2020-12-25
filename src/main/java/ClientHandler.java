@@ -33,6 +33,7 @@ public class ClientHandler implements IHandler {
     private InetAddress hostAddress;
     private int hostPort;
     private HostHandler hostHandler;
+    private boolean closed;
 
     public ClientHandler(SelectionKey key) throws IOException {
         clientChannel = ((ServerSocketChannel) key.channel()).accept();
@@ -47,6 +48,14 @@ public class ClientHandler implements IHandler {
 
     public SelectionKey getClientKey() {
         return clientKey;
+    }
+
+    public String getHostName() {
+        return hostName;
+    }
+
+    public boolean isClosed() {
+        return closed;
     }
 
     @Override
@@ -76,6 +85,9 @@ public class ClientHandler implements IHandler {
                 if (key.isReadable()) {
                     read(key);
                 }
+                else if (key.isWritable()) {
+                    write(key);
+                }
             }
         }
     }
@@ -86,12 +98,14 @@ public class ClientHandler implements IHandler {
             int len = clientChannel.read(byteBuffer);
             if (len < 1) {
                 log.error("Received " + len + " bytes");
+                close();
                 return;
             }
             byte[] bytes = Arrays.copyOfRange(byteBuffer.array(), 0, len);
             log.info("Greeting received : " + Arrays.toString(bytes));
             if (bytes[0] != 0x05) {
                 log.error("Client doesn't support SOCKS5");
+                close();
                 return;
             }
             boolean isFoundMethodWithoutAuth = false;
@@ -109,6 +123,7 @@ public class ClientHandler implements IHandler {
             key.interestOps(SelectionKey.OP_WRITE);
         } catch (IOException e) {
             log.error(e.toString());
+            close();
         }
     }
 
@@ -118,12 +133,13 @@ public class ClientHandler implements IHandler {
         try {
             clientChannel.write(byteBuffer);
             log.info("Choice sent : " + Arrays.toString(byteBuffer.array()));
+            state = ClientState.READ_CONNECT;
+            key.interestOps(SelectionKey.OP_READ);
         }
         catch (IOException e) {
             log.error(e.toString());
+            close();
         }
-        state = ClientState.READ_CONNECT;
-        key.interestOps(SelectionKey.OP_READ);
     }
 
     private void readConnect(SelectionKey key) {
@@ -132,16 +148,19 @@ public class ClientHandler implements IHandler {
             int len = clientChannel.read(byteBuffer);
             if (len < 1) {
                 log.error("Received " + len + " bytes");
+                close();
                 return;
             }
             connectRequest = Arrays.copyOfRange(byteBuffer.array(), 0, len);
             log.info("Connection info received : " + Arrays.toString(connectRequest));
             if (connectRequest[0] != 0x05) {
                 log.error("Client doesn't support SOCKS5");
+                close();
                 return;
             }
             if (connectRequest[1] != 0x01) {
                 log.error("Proxy server doesn't support this command");
+                close();
                 return;
             }
             switch (connectRequest[3]) {
@@ -163,10 +182,12 @@ public class ClientHandler implements IHandler {
                 }
                 case 0x04 -> {
                     log.error("Proxy server doesn't support IPv6 addresses");
+                    close();
                     return;
                 }
                 default -> {
                     log.error("Wrong type of address");
+                    close();
                     return;
                 }
             }
@@ -175,6 +196,7 @@ public class ClientHandler implements IHandler {
         }
         catch (IOException e) {
             log.error(e.toString());
+            close();
         }
     }
 
@@ -183,7 +205,8 @@ public class ClientHandler implements IHandler {
             hostHandler = new HostHandler(this, hostAddress, hostPort);
         }
         catch (IOException e) {
-            e.printStackTrace();
+            log.error(e.toString());
+            close();
         }
     }
 
@@ -196,6 +219,14 @@ public class ClientHandler implements IHandler {
         }
     }
 
+    public void readyToResponse() {
+        if (state == ClientState.WAIT_HOST) {
+            state = ClientState.SEND_RESPONSE;
+            clientKey.interestOps(SelectionKey.OP_WRITE);
+            log.info("Client ready to response");
+        }
+    }
+
     private void sendResponse(SelectionKey key) {
         byte[] connectResponse = Arrays.copyOf(connectRequest, connectRequest.length);
         connectResponse[1] = 0x00;
@@ -203,21 +234,71 @@ public class ClientHandler implements IHandler {
         try {
             clientChannel.write(byteBuffer);
             log.info("Response sent : " + Arrays.toString(byteBuffer.array()));
-        } catch (IOException e) {
-            log.error(e.toString());
+            state = ClientState.CONNECTED;
+            key.interestOps(SelectionKey.OP_READ);
         }
-        state = ClientState.CONNECTED;
-        key.interestOps(SelectionKey.OP_READ);
+        catch (IOException e) {
+            log.error(e.toString());
+            close();
+        }
     }
 
     private void read(SelectionKey key) {
-        ByteBuffer byteBuffer = ByteBuffer.allocate(8192);
         try {
-            int len = clientChannel.read(byteBuffer);
-            System.out.println(new String(Arrays.copyOfRange(byteBuffer.array(), 0, len)));
+            int len = clientChannel.read(hostHandler.getRequestBuffer());
+            if (len < 0) {
+                close();
+                return;
+            }
+            log.info(hostName + " : " + len + " bytes received from client");
+            hostHandler.getHostKey().interestOps(hostHandler.getHostKey().interestOps() |
+                    SelectionKey.OP_WRITE);
         }
         catch (IOException e) {
-            e.printStackTrace();
+            log.error(e.toString());
+            close();
+        }
+    }
+
+    private void write(SelectionKey key) {
+        try {
+            hostHandler.getResponseBuffer().flip();
+            int len = clientChannel.write(hostHandler.getResponseBuffer());
+            if (len < 0) {
+                close();
+                return;
+            }
+            log.info(hostName + " : " + len + " bytes sent to client");
+            if (hostHandler.getResponseBuffer().remaining() == 0) {
+                hostHandler.getResponseBuffer().clear();
+                clientKey.interestOps(SelectionKey.OP_READ);
+                if (hostHandler.isClosed()) {
+                    close();
+                }
+            }
+            else {
+                hostHandler.getResponseBuffer().compact();
+            }
+        }
+        catch (IOException e) {
+            log.error(e.toString());
+            close();
+        }
+    }
+
+    public void close() {
+        clientKey.cancel();
+        ProxyServer.getInstance().removeChannelFromMap(clientChannel);
+        try {
+            clientChannel.close();
+        }
+        catch (IOException e) {
+            log.error(e.toString());
+        }
+        log.info(hostName + " : " + "client closed");
+        closed = true;
+        if (hostHandler != null && !hostHandler.isClosed()) {
+            hostHandler.close();
         }
     }
 }
