@@ -6,7 +6,6 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 
 public class HostHandler implements IHandler {
@@ -14,11 +13,11 @@ public class HostHandler implements IHandler {
 
     private static final int BUF_SIZE = 8192;
 
-    private SocketChannel hostChannel;
-    private SelectionKey hostKey;
-    private ClientHandler clientHandler;
-    private ByteBuffer requestBuffer;
-    private ByteBuffer responseBuffer;
+    private final SocketChannel hostChannel;
+    private final SelectionKey hostKey;
+    private final ClientHandler clientHandler;
+    private final ByteBuffer requestBuffer;
+    private final ByteBuffer responseBuffer;
     private boolean closed = false;
 
     public HostHandler(ClientHandler clientHandler, InetAddress hostAddress, int hostPort) throws IOException {
@@ -34,31 +33,34 @@ public class HostHandler implements IHandler {
     }
 
     @Override
-    public void handleKey(SelectionKey key) {
-        if (key.isConnectable()) {
-            connect(key);
+    public void handleKey() {
+        if (hostKey.isConnectable()) {
+            connect();
         }
-        if (key.isWritable()) {
-            write(key);
+        else if (hostKey.isWritable()) {
+            write();
         }
-        if (key.isReadable()) {
-            read(key);
+        else if (hostKey.isReadable()) {
+            read();
         }
     }
 
-    private void connect(SelectionKey key) {
+    private void connect() {
         try {
-            ((SocketChannel) key.channel()).finishConnect();
-            key.interestOps(SelectionKey.OP_READ);
+            hostChannel.finishConnect();
+            hostKey.interestOps(SelectionKey.OP_READ);
             log.info("Connect finished");
+            clientHandler.setResponseType((byte) 0x00);
             clientHandler.readyToResponse();
         }
         catch (IOException e) {
             log.error(e.toString());
+            clientHandler.setResponseType((byte) 0x04);
+            clientHandler.readyToResponse();
         }
     }
 
-    private void write(SelectionKey key) {
+    private void write() {
         try {
             requestBuffer.flip();
             int len = hostChannel.write(requestBuffer);
@@ -80,7 +82,7 @@ public class HostHandler implements IHandler {
         }
     }
 
-    private void read(SelectionKey key) {
+    private void read() {
         try {
             int len = hostChannel.read(responseBuffer);
             if (len < 0) {

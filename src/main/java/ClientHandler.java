@@ -3,10 +3,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.Arrays;
@@ -24,11 +22,12 @@ public class ClientHandler implements IHandler {
         CONNECTED
     }
 
-    private SocketChannel clientChannel;
-    private SelectionKey clientKey;
+    private final SocketChannel clientChannel;
+    private final SelectionKey clientKey;
     private ClientState state;
     private byte authMethod = 0x00;
     private byte[] connectRequest;
+    private byte responseType;
     private String hostName;
     private InetAddress hostAddress;
     private int hostPort;
@@ -59,40 +58,40 @@ public class ClientHandler implements IHandler {
     }
 
     @Override
-    public void handleKey(SelectionKey key) {
+    public void handleKey() {
         switch (state) {
             case READ_GREETING -> {
-                if (key.isReadable()) {
-                    readGreeting(key);
+                if (clientKey.isReadable()) {
+                    readGreeting();
                 }
             }
             case SEND_CHOICE -> {
-                if (key.isWritable()) {
-                    sendChoice(key);
+                if (clientKey.isWritable()) {
+                    sendChoice();
                 }
             }
             case READ_CONNECT -> {
-                if (key.isReadable()) {
-                    readConnect(key);
+                if (clientKey.isReadable()) {
+                    readConnect();
                 }
             }
             case SEND_RESPONSE -> {
-                if (key.isWritable()) {
-                    sendResponse(key);
+                if (clientKey.isWritable()) {
+                    sendResponse();
                 }
             }
             case CONNECTED -> {
-                if (key.isReadable()) {
-                    read(key);
+                if (clientKey.isReadable()) {
+                    read();
                 }
-                else if (key.isWritable()) {
-                    write(key);
+                else if (clientKey.isWritable()) {
+                    write();
                 }
             }
         }
     }
 
-    private void readGreeting(SelectionKey key) {
+    private void readGreeting() {
         ByteBuffer byteBuffer = ByteBuffer.allocate(257);
         try {
             int len = clientChannel.read(byteBuffer);
@@ -120,21 +119,21 @@ public class ClientHandler implements IHandler {
                 authMethod = (byte) 0xFF;
             }
             state = ClientState.SEND_CHOICE;
-            key.interestOps(SelectionKey.OP_WRITE);
+            clientKey.interestOps(SelectionKey.OP_WRITE);
         } catch (IOException e) {
             log.error(e.toString());
             close();
         }
     }
 
-    private void sendChoice(SelectionKey key) {
+    private void sendChoice() {
         byte[] bytes = new byte[] {0x05, authMethod};
         ByteBuffer byteBuffer = ByteBuffer.wrap(bytes);
         try {
             clientChannel.write(byteBuffer);
             log.info("Choice sent : " + Arrays.toString(byteBuffer.array()));
             state = ClientState.READ_CONNECT;
-            key.interestOps(SelectionKey.OP_READ);
+            clientKey.interestOps(SelectionKey.OP_READ);
         }
         catch (IOException e) {
             log.error(e.toString());
@@ -142,7 +141,7 @@ public class ClientHandler implements IHandler {
         }
     }
 
-    private void readConnect(SelectionKey key) {
+    private void readConnect() {
         ByteBuffer byteBuffer = ByteBuffer.allocate(8192);
         try {
             int len = clientChannel.read(byteBuffer);
@@ -160,17 +159,23 @@ public class ClientHandler implements IHandler {
             }
             if (connectRequest[1] != 0x01) {
                 log.error("Proxy server doesn't support this command");
-                close();
+                responseType = 0x07;
+                readyToResponse();
                 return;
             }
+
+            hostPort = ByteBuffer.wrap(Arrays.copyOfRange(connectRequest, len - 2, len)).getShort();
+            log.info("Host port : " + hostPort);
+
             switch (connectRequest[3]) {
                 case 0x01 -> {
                     byte[] addressBytes = Arrays.copyOfRange(connectRequest, 4, 8);
                     hostAddress = InetAddress.getByAddress(addressBytes);
+                    hostName = hostAddress.getHostAddress();
                     log.info("Host has IPv4 address : " + hostAddress.getHostAddress());
                     initHost();
                     state = ClientState.WAIT_HOST;
-                    key.interestOps(0);
+                    clientKey.interestOps(0);
                 }
                 case 0x03 -> {
                     int addressLength = connectRequest[4];
@@ -178,21 +183,21 @@ public class ClientHandler implements IHandler {
                     log.info("Host name : " + hostName);
                     DnsResolver.getInstance().addNewRequest(this, hostName);
                     state = ClientState.WAIT_DNS;
-                    key.interestOps(0);
+                    clientKey.interestOps(0);
                 }
                 case 0x04 -> {
                     log.error("Proxy server doesn't support IPv6 addresses");
-                    close();
+                    responseType = 0x08;
+                    readyToResponse();
                     return;
                 }
                 default -> {
                     log.error("Wrong type of address");
-                    close();
+                    responseType = 0x08;
+                    readyToResponse();
                     return;
                 }
             }
-            hostPort = ByteBuffer.wrap(Arrays.copyOfRange(connectRequest, len - 2, len)).getShort();
-            log.info("Host port : " + hostPort);
         }
         catch (IOException e) {
             log.error(e.toString());
@@ -212,6 +217,12 @@ public class ClientHandler implements IHandler {
 
     public void setHostAddress(InetAddress hostAddress) {
         if (state == ClientState.WAIT_DNS) {
+            if (hostAddress == null) {
+                log.info("DNS server can't find domain " + hostName);
+                responseType = 0x04;
+                readyToResponse();
+                return;
+            }
             this.hostAddress = hostAddress;
             state = ClientState.WAIT_HOST;
             log.info("Host address : " + hostAddress.getHostAddress());
@@ -220,22 +231,29 @@ public class ClientHandler implements IHandler {
     }
 
     public void readyToResponse() {
-        if (state == ClientState.WAIT_HOST) {
-            state = ClientState.SEND_RESPONSE;
-            clientKey.interestOps(SelectionKey.OP_WRITE);
-            log.info("Client ready to response");
-        }
+        state = ClientState.SEND_RESPONSE;
+        clientKey.interestOps(SelectionKey.OP_WRITE);
+        log.info("Client ready to response");
     }
 
-    private void sendResponse(SelectionKey key) {
+    public void setResponseType(byte responseType) {
+        this.responseType = responseType;
+    }
+
+    private void sendResponse() {
         byte[] connectResponse = Arrays.copyOf(connectRequest, connectRequest.length);
-        connectResponse[1] = 0x00;
+        connectResponse[1] = responseType;
         ByteBuffer byteBuffer = ByteBuffer.wrap(connectResponse);
         try {
             clientChannel.write(byteBuffer);
             log.info("Response sent : " + Arrays.toString(byteBuffer.array()));
-            state = ClientState.CONNECTED;
-            key.interestOps(SelectionKey.OP_READ);
+            if (responseType == 0x00) {
+                state = ClientState.CONNECTED;
+                clientKey.interestOps(SelectionKey.OP_READ);
+            }
+            else {
+                close();
+            }
         }
         catch (IOException e) {
             log.error(e.toString());
@@ -243,7 +261,7 @@ public class ClientHandler implements IHandler {
         }
     }
 
-    private void read(SelectionKey key) {
+    private void read() {
         try {
             int len = clientChannel.read(hostHandler.getRequestBuffer());
             if (len < 0) {
@@ -260,7 +278,7 @@ public class ClientHandler implements IHandler {
         }
     }
 
-    private void write(SelectionKey key) {
+    private void write() {
         try {
             hostHandler.getResponseBuffer().flip();
             int len = clientChannel.write(hostHandler.getResponseBuffer());

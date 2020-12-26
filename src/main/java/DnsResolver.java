@@ -4,7 +4,6 @@ import org.xbill.DNS.*;
 import org.xbill.DNS.Record;
 
 import java.io.IOException;
-import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -22,7 +21,6 @@ public class DnsResolver implements IHandler {
 
     private static DnsResolver instance;
 
-    private InetSocketAddress dnsServer;
     private DatagramChannel dnsChannel;
     private Queue<DnsRequest> requestQueue;
     private Map<Name, ClientHandler> responseQueue;
@@ -37,7 +35,7 @@ public class DnsResolver implements IHandler {
     }
 
     public void start(String host, int port, Selector selector) throws IOException {
-        dnsServer = ResolverConfig.getCurrentConfig().server();
+        InetSocketAddress dnsServer = ResolverConfig.getCurrentConfig().server();
         dnsChannel = DatagramChannel.open();
         dnsChannel.socket().connect(dnsServer);
         dnsChannel.configureBlocking(false);
@@ -56,16 +54,16 @@ public class DnsResolver implements IHandler {
     }
 
     @Override
-    public void handleKey(SelectionKey key) {
-        if (key.isWritable()) {
-            sendDnsMessage(key);
+    public void handleKey() {
+        if (dnsKey.isWritable()) {
+            sendDnsMessage();
         }
-        if (key.isReadable()) {
-            readDnsMessage(key);
+        if (dnsKey.isReadable()) {
+            readDnsMessage();
         }
     }
 
-    private void sendDnsMessage(SelectionKey key) {
+    private void sendDnsMessage() {
         Message message = new Message();
         Header header = new Header();
         header.setFlag(Flags.RD);
@@ -99,7 +97,7 @@ public class DnsResolver implements IHandler {
         }
     }
 
-    private void readDnsMessage(SelectionKey key) {
+    private void readDnsMessage() {
         ByteBuffer byteBuffer = ByteBuffer.allocate(512);
         try {
             int len = dnsChannel.read(byteBuffer);
@@ -107,8 +105,8 @@ public class DnsResolver implements IHandler {
                 return;
             }
             Message message = new Message(byteBuffer.array());
+            Name hostName = message.getQuestion().getName();
             List<Record> answers = message.getSection(Section.ANSWER);
-            Name hostName = answers.get(0).getName();
             log.info("Received DNS response for " + hostName);
             if (!responseQueue.containsKey(hostName)) {
                 return;
@@ -121,14 +119,11 @@ public class DnsResolver implements IHandler {
                     break;
                 }
             }
+            clientHandler.setHostAddress(null);
         }
         catch (IOException e) {
             e.printStackTrace();
         }
-    }
-
-    public DatagramChannel getDnsChannel() {
-        return dnsChannel;
     }
 
     private static class DnsRequest {

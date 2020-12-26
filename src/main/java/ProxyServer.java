@@ -14,12 +14,7 @@ public class ProxyServer {
 
     private static ProxyServer instance;
 
-    private String host;
-    private int proxyPort;
-    private int dnsPort;
-
     private Selector selector;
-    private ServerSocketChannel serverSocketChannel;
     private Map<SelectableChannel, IHandler> channelToHandler;
 
     private ProxyServer() {}
@@ -31,15 +26,12 @@ public class ProxyServer {
     }
 
     public void start(String host, int proxyPort, int dnsPort) {
-        this.host = host;
-        this.proxyPort = proxyPort;
-        this.dnsPort = dnsPort;
 
         channelToHandler = new ConcurrentHashMap<>();
 
         try {
             selector = SelectorProvider.provider().openSelector();
-            serverSocketChannel = ServerSocketChannel.open();
+            ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
             serverSocketChannel.configureBlocking(false);
             serverSocketChannel.socket().bind(new InetSocketAddress(host, proxyPort));
             serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT);
@@ -63,7 +55,7 @@ public class ProxyServer {
                             accept(key);
                         }
                         else {
-                            channelToHandler.get(key.channel()).handleKey(key);
+                            channelToHandler.get(key.channel()).handleKey();
                         }
                     }
                 }
