@@ -79,6 +79,7 @@ public class HostHandler implements IHandler {
         }
         catch (IOException e) {
             log.error(e.toString());
+            close();
         }
     }
 
@@ -95,6 +96,7 @@ public class HostHandler implements IHandler {
         }
         catch (IOException e) {
             log.error(e.toString());
+            close();
         }
     }
 

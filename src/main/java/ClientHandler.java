@@ -189,13 +189,11 @@ public class ClientHandler implements IHandler {
                     log.error("Proxy server doesn't support IPv6 addresses");
                     responseType = 0x08;
                     readyToResponse();
-                    return;
                 }
                 default -> {
                     log.error("Wrong type of address");
                     responseType = 0x08;
                     readyToResponse();
-                    return;
                 }
             }
         }
